@@ -1,8 +1,10 @@
+python-dotenv
+python-telegram-bot
 Flask
 requests
 pandas
-numpy==1.23.5
 scikit-learn
-tensorflow==2.10.0
 textblob
-python-dotenv
+tensorflow
+scipy
+nltk
