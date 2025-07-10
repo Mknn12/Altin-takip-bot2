@@ -14,6 +14,8 @@ import numpy as np
 from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
 from bs4 import BeautifulSoup
+import pytz
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # Ortam degiskenleri
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -105,10 +107,12 @@ dp = updater.dispatcher
 dp.add_handler(CommandHandler("durum", durum))
 updater.start_polling()
 
-# Scheduler başlat
-scheduler = BackgroundScheduler()
+
+
+scheduler = BackgroundScheduler(timezone=pytz.utc)
 scheduler.add_job(veri_guncelle, "interval", minutes=5)
 scheduler.start()
+
 
 # Flask endpoint
 @app.route("/")
@@ -116,4 +120,5 @@ def home():
     return "Bot calisiyor."
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
