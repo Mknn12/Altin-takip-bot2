@@ -1,116 +1,119 @@
+# main.py
 import os
-import time
-import logging
 import requests
-from dotenv import load_dotenv
-from flask import Flask, request
+import sqlite3
+import logging
+from flask import Flask
+from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler, Filters, MessageHandler
-from threading import Thread
+from telegram.ext import CommandHandler, Updater, CallbackContext
+from textblob import TextBlob
+from datetime import datetime
+import pandas as pd
+import numpy as np
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from bs4 import BeautifulSoup
 
-load_dotenv()
+# Ortam degiskenleri
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+FMP_API_KEY = os.getenv("FMP_API_KEY")
 
-# API KEYLERİ
-FMP_API_KEY = os.getenv("FMP_API_KEY")  # Financial Modeling Prep
-GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Telegram bot ayar
+bot = Bot(token=BOT_TOKEN)
 
+# Veritabani baglantisi
+conn = sqlite3.connect("veri.db", check_same_thread=False)
+c = conn.cursor()
+c.execute('''CREATE TABLE IF NOT EXISTS fiyatlar (
+    tarih TEXT,
+    altin REAL,
+    usd REAL,
+    haber_puani REAL
+)''')
+conn.commit()
+
+# Flask sunucusu
 app = Flask(__name__)
-bot = Bot(token=TELEGRAM_TOKEN)
 
+# Logger
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
 
-# ---- Fiyatları çekme fonksiyonları ----
-def get_gold_price():
-    url = f"https://financialmodelingprep.com/api/v3/quote/GC=F?apikey={FMP_API_KEY}"
+# Veri cekme
+def veri_guncelle():
     try:
-        resp = requests.get(url)
-        data = resp.json()
-        if isinstance(data, list) and len(data) > 0:
-            price = data[0].get('price')
-            return price
-        else:
-            logger.error("Altın fiyatı verisi boş veya hatalı formatta")
-            return None
+        altin = requests.get(f"https://financialmodelingprep.com/api/v3/quote/GCUSD?apikey={FMP_API_KEY}").json()[0]['price']
+        usd = requests.get(f"https://financialmodelingprep.com/api/v3/fx/USD/TRY?apikey={FMP_API_KEY}").json()['to']
+        haberler = requests.get("https://www.bloomberg.com/markets/economics").text
+        soup = BeautifulSoup(haberler, 'lxml')
+        metin = ' '.join([p.text for p in soup.find_all('p')])
+        haber_puani = TextBlob(metin).sentiment.polarity
+
+        tarih = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("INSERT INTO fiyatlar VALUES (?, ?, ?, ?)", (tarih, altin, usd, haber_puani))
+        conn.commit()
+
+        logging.info(f"Veri alindi: {tarih} Altin: {altin}, USD: {usd}, Haber: {haber_puani}")
+
+        model_tahmin()
+
     except Exception as e:
-        logger.error(f"Altın fiyatı çekme hatası: {e}")
-        return None
+        logging.error(f"Veri cekme hatasi: {e}")
 
-def get_usd_try():
-    url = f"https://financialmodelingprep.com/api/v3/quote/USDTRY=X?apikey={FMP_API_KEY}"
-    try:
-        resp = requests.get(url)
-        data = resp.json()
-        if isinstance(data, list) and len(data) > 0:
-            price = data[0].get('price')
-            return price
-        else:
-            logger.error("USD/TRY kuru verisi boş veya hatalı formatta")
-            return None
-    except Exception as e:
-        logger.error(f"USD/TRY kuru çekme hatası: {e}")
-        return None
+# ML tahmin
+def model_tahmin():
+    df = pd.read_sql_query("SELECT * FROM fiyatlar", conn)
+    if len(df) < 20:
+        return
 
-# ---- Haberleri çekme fonksiyonu (GNews API, günlük 100 istek limitli) ----
-def get_news(query="altın", max_articles=5):
-    url = f"https://gnews.io/api/v4/search?q={query}&token={GNEWS_API_KEY}&lang=tr&max={max_articles}"
-    try:
-        resp = requests.get(url)
-        data = resp.json()
-        if data.get("articles"):
-            articles = data["articles"]
-            return articles
-        else:
-            logger.error("Haber verisi boş veya hatalı formatta")
-            return []
-    except Exception as e:
-        logger.error(f"Haber çekme hatası: {e}")
-        return []
+    df['tarih'] = pd.to_datetime(df['tarih'])
+    df.sort_values('tarih', inplace=True)
 
-# ---- Telegram komutları ----
-def durum(update, context):
-    gold_price = get_gold_price()
-    usd_try = get_usd_try()
+    df['altin_gelecek'] = df['altin'].shift(-1)
+    df.dropna(inplace=True)
 
-    if gold_price is None or usd_try is None:
-        text = "Fiyat bilgileri alınamadı."
+    X = df[['altin', 'usd', 'haber_puani']]
+    y = df['altin_gelecek']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    model = XGBRegressor()
+    model.fit(X_train, y_train)
+
+    gelecek_tahmin = model.predict([X.iloc[-1]])[0]
+    logging.info(f"Tahmin edilen altin: {gelecek_tahmin:.2f}")
+
+    if gelecek_tahmin > df['altin'].iloc[-1] * 1.01:
+        bot.send_message(chat_id=CHAT_ID, text=f"📈 Altin yukselecek gibi görünüyor! Tahmin: {gelecek_tahmin:.2f}")
+    elif gelecek_tahmin < df['altin'].iloc[-1] * 0.99:
+        bot.send_message(chat_id=CHAT_ID, text=f"📉 Altin dusme sinyali verdi! Tahmin: {gelecek_tahmin:.2f}")
+
+# /durum komutu
+
+def durum(update: Update, context: CallbackContext):
+    c.execute("SELECT * FROM fiyatlar ORDER BY tarih DESC LIMIT 1")
+    row = c.fetchone()
+    if row:
+        mesaj = f"📊 Son Veri\nTarih: {row[0]}\nAltin: {row[1]}\nUSD: {row[2]}\nHaber Puani: {row[3]:.2f}"
     else:
-        text = (f"Gram Altın: {gold_price:.2f} USD\n"
-                f"USD/TRY: {usd_try:.4f} TL\n")
+        mesaj = "Veri bulunamadi."
+    update.message.reply_text(mesaj)
 
-    update.message.reply_text(text)
+# Bot dispatcher
+updater = Updater(BOT_TOKEN, use_context=True)
+dp = updater.dispatcher
+dp.add_handler(CommandHandler("durum", durum))
+updater.start_polling()
 
-def start(update, context):
-    update.message.reply_text(
-        "Merhaba! /durum komutuyla güncel fiyatları görebilirsin."
-    )
+# Scheduler başlat
+scheduler = BackgroundScheduler()
+scheduler.add_job(veri_guncelle, "interval", minutes=5)
+scheduler.start()
 
-# ---- Flask ve Telegram Bot entegrasyonu ----
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def telegram_webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "ok"
-
-def run_flask():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
-# ---- Telegram bot dispatcher ayarı ----
-dispatcher = Dispatcher(bot, None, workers=0)
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("durum", durum))
-
-# ---- Main döngü (Render veya başka sunucuda 12 saatlik çalışmaya uygun) ----
-def main():
-    # Flask web sunucusunu thread olarak başlat
-    Thread(target=run_flask).start()
-
-    # Buraya ileride fiyat takibi ve fırsat varsa Telegram'a bildirme kodu eklenebilir
-    while True:
-        time.sleep(3600)  # Saatte bir bekle (veya ihtiyaca göre değiştir)
-        # Fiyat ve fırsat kontrolü yapılabilir
+# Flask endpoint
+@app.route("/")
+def home():
+    return "Bot calisiyor."
 
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=5000)
