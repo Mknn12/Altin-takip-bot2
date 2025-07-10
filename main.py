@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from flask import Flask, request
 from threading import Thread
-from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from textblob import TextBlob
@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+FMP_API_KEY = os.getenv("FMP_API_KEY")
 
 app = Flask(__name__)
 
@@ -38,28 +39,38 @@ def init_db():
 
 def get_gold_price():
     try:
-        url = "https://api.exchangerate.host/latest?base=XAU&symbols=TRY"
+        url = f"https://financialmodelingprep.com/api/v3/quote/XAUUSD?apikey={FMP_API_KEY}"
         response = requests.get(url, timeout=10)
         data = response.json()
-        return data["rates"]["TRY"]
+        if isinstance(data, list) and len(data) > 0:
+            usd_price = data[0]["price"]
+            # USD/TRY oranını çek
+            kur = get_usd_to_try()
+            if kur:
+                return usd_price * kur
     except Exception as e:
         logging.error(f"Altın fiyatı çekme hatası: {e}")
+    return None
+
+def get_usd_to_try():
+    try:
+        url = f"https://financialmodelingprep.com/api/v3/fx/USD/TRY?apikey={FMP_API_KEY}"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        return data.get("price")
+    except Exception as e:
+        logging.error(f"USD/TRY kuru çekme hatası: {e}")
         return None
 
 def get_finance_news():
-    news_sources = [
-        ("https://newsdata.io/api/1/news?apikey=demo&q=finance&country=tr", "results"),
-        # İstersen burada ücretsiz başka haber API'ları ekleyebilirsin.
-    ]
-    titles = []
-    for url, key in news_sources:
-        try:
-            response = requests.get(url, timeout=10)
-            articles = response.json().get(key, [])
-            titles.extend([a["title"] for a in articles])
-        except Exception as e:
-            logging.error(f"Haber çekme hatası ({url}): {e}")
-    return titles[:10]
+    try:
+        url = f"https://financialmodelingprep.com/api/v3/stock_news?limit=50&apikey={FMP_API_KEY}"
+        response = requests.get(url, timeout=10)
+        articles = response.json()
+        return [a["title"] for a in articles][:10]
+    except Exception as e:
+        logging.error(f"Haber çekme hatası: {e}")
+        return []
 
 def analyze_news(news_titles):
     results = []
@@ -90,7 +101,7 @@ def train_model():
         return False
     data = df.copy()
     scaler = MinMaxScaler()
-    data["fiyat_scaled"] = scaler.fit_transform(data["fiyat"].values.reshape(-1,1))
+    data["fiyat_scaled"] = scaler.fit_transform(data["fiyat"].values.reshape(-1, 1))
 
     seq_len = 10
     X, y = [], []
@@ -101,7 +112,7 @@ def train_model():
     X = X.reshape((X.shape[0], X.shape[1], 1))
 
     model = Sequential()
-    model.add(LSTM(50, return_sequences=True, input_shape=(seq_len,1)))
+    model.add(LSTM(50, return_sequences=True, input_shape=(seq_len, 1)))
     model.add(LSTM(50))
     model.add(Dense(1))
     model.compile(optimizer="adam", loss="mean_squared_error")
@@ -132,18 +143,16 @@ def lstm_predict(prices):
     model, scaler = load_model_and_scaler()
     if model is None or scaler is None or len(prices) < 10:
         return None
-    scaled = scaler.transform(prices["fiyat"].values.reshape(-1,1))
+    scaled = scaler.transform(prices["fiyat"].values.reshape(-1, 1))
     seq_len = 10
     X = []
     X.append(scaled[-seq_len:].reshape(seq_len, 1))
     X = np.array(X)
     pred_scaled = model.predict(X)[0][0]
-    # Tahmini geri ölçeğe dönüştür
     pred = pred_scaled * (1 / scaler.scale_[0]) - scaler.min_[0] / scaler.scale_[0]
     return pred
 
 def calc_confidence_score():
-    # Basit güven skoru: son 10 tahminin ortalama hata yüzdesi baz alınır
     df = load_prices()
     if len(df) < 20:
         return None
@@ -153,16 +162,16 @@ def calc_confidence_score():
     errors = []
     seq_len = 10
     data = df.copy()
-    scaled = scaler.transform(data["fiyat"].values.reshape(-1,1))
-    for i in range(len(data)-seq_len-1):
-        X = scaled[i:i+seq_len].reshape(1, seq_len, 1)
+    scaled = scaler.transform(data["fiyat"].values.reshape(-1, 1))
+    for i in range(len(data) - seq_len - 1):
+        X = scaled[i:i + seq_len].reshape(1, seq_len, 1)
         pred = model.predict(X)[0][0]
-        true = scaled[i+seq_len][0]
+        true = scaled[i + seq_len][0]
         errors.append(abs(true - pred))
     if not errors:
         return None
     avg_error = np.mean(errors)
-    confidence = max(0, 100 - avg_error*1000)  # kabaca yüzdelik bir skor
+    confidence = max(0, 100 - avg_error * 1000)
     return round(confidence, 2)
 
 def send_telegram_message(text):
@@ -176,6 +185,7 @@ def send_telegram_message(text):
 
 def monitor_loop():
     last_train_date = None
+    check_counter = 0
     while True:
         fiyat = get_gold_price()
         if fiyat:
@@ -187,24 +197,26 @@ def monitor_loop():
 
             df = load_prices()
             tahmin = lstm_predict(df.tail(50))
-            haberler = get_finance_news()
-            analiz = analyze_news(haberler)
             confidence = calc_confidence_score()
 
             mesaj = ""
-            for title, sentiment, keywords in analiz:
-                if keywords or sentiment < -0.1:
-                    mesaj += f"📢 Haber: {title}\n➡ Duygu: {'Negatif' if sentiment < 0 else 'Pozitif'}\nAnahtar: {', '.join(keywords)}\n\n"
-
             if tahmin and fiyat < tahmin * 0.97:
                 mesaj += f"💰 Fırsat: Altın şu anda {fiyat:.2f} ₺, tahmin {tahmin:.2f} ₺\n"
                 if confidence is not None:
                     mesaj += f"🔒 Güven skoru: %{confidence}\n"
 
+            if check_counter % 6 == 0:  # 6x10dk = 1 saat
+                haberler = get_finance_news()
+                analiz = analyze_news(haberler)
+                for title, sentiment, keywords in analiz:
+                    if keywords or sentiment < -0.1:
+                        mesaj += f"📢 Haber: {title}\n➡ Duygu: {'Negatif' if sentiment < 0 else 'Pozitif'}\nAnahtar: {', '.join(keywords)}\n\n"
+
             if mesaj:
                 send_telegram_message(mesaj)
 
-        time.sleep(600)  # 10 dakikada bir kontrol
+        check_counter += 1
+        time.sleep(600)
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
