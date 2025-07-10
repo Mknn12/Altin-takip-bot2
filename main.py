@@ -1,234 +1,116 @@
 import os
 import time
-import requests
-import sqlite3
-import numpy as np
-import pandas as pd
-from flask import Flask, request
-from threading import Thread
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
-from sklearn.preprocessing import MinMaxScaler
-from textblob import TextBlob
-import datetime
 import logging
+import requests
+from dotenv import load_dotenv
+from flask import Flask, request
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler, Filters, MessageHandler
+from threading import Thread
 
-logging.basicConfig(level=logging.INFO)
+load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-FMP_API_KEY = os.getenv("FMP_API_KEY")
+# API KEYLERİ
+FMP_API_KEY = os.getenv("FMP_API_KEY")  # Financial Modeling Prep
+GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 app = Flask(__name__)
+bot = Bot(token=TELEGRAM_TOKEN)
 
-KEYWORDS = ["faiz", "cumhurbaşkanı", "merkez bankası", "enflasyon"]
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
 
-DB_PATH = "veri.db"
-MODEL_PATH = "lstm_model.h5"
-SCALER_PATH = "scaler.npy"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS altin (
-        zaman TEXT,
-        fiyat REAL
-    )""")
-    conn.commit()
-    conn.close()
-
+# ---- Fiyatları çekme fonksiyonları ----
 def get_gold_price():
+    url = f"https://financialmodelingprep.com/api/v3/quote/GC=F?apikey={FMP_API_KEY}"
     try:
-        url = f"https://financialmodelingprep.com/api/v3/quote/XAUUSD?apikey={FMP_API_KEY}"
-        response = requests.get(url, timeout=10)
-        data = response.json()
+        resp = requests.get(url)
+        data = resp.json()
         if isinstance(data, list) and len(data) > 0:
-            usd_price = data[0]["price"]
-            # USD/TRY oranını çek
-            kur = get_usd_to_try()
-            if kur:
-                return usd_price * kur
+            price = data[0].get('price')
+            return price
+        else:
+            logger.error("Altın fiyatı verisi boş veya hatalı formatta")
+            return None
     except Exception as e:
-        logging.error(f"Altın fiyatı çekme hatası: {e}")
-    return None
-
-def get_usd_to_try():
-    try:
-        url = f"https://financialmodelingprep.com/api/v3/fx/USD/TRY?apikey={FMP_API_KEY}"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        return data.get("price")
-    except Exception as e:
-        logging.error(f"USD/TRY kuru çekme hatası: {e}")
+        logger.error(f"Altın fiyatı çekme hatası: {e}")
         return None
 
-def get_finance_news():
+def get_usd_try():
+    url = f"https://financialmodelingprep.com/api/v3/quote/USDTRY=X?apikey={FMP_API_KEY}"
     try:
-        url = f"https://financialmodelingprep.com/api/v3/stock_news?limit=50&apikey={FMP_API_KEY}"
-        response = requests.get(url, timeout=10)
-        articles = response.json()
-        return [a["title"] for a in articles][:10]
+        resp = requests.get(url)
+        data = resp.json()
+        if isinstance(data, list) and len(data) > 0:
+            price = data[0].get('price')
+            return price
+        else:
+            logger.error("USD/TRY kuru verisi boş veya hatalı formatta")
+            return None
     except Exception as e:
-        logging.error(f"Haber çekme hatası: {e}")
+        logger.error(f"USD/TRY kuru çekme hatası: {e}")
+        return None
+
+# ---- Haberleri çekme fonksiyonu (GNews API, günlük 100 istek limitli) ----
+def get_news(query="altın", max_articles=5):
+    url = f"https://gnews.io/api/v4/search?q={query}&token={GNEWS_API_KEY}&lang=tr&max={max_articles}"
+    try:
+        resp = requests.get(url)
+        data = resp.json()
+        if data.get("articles"):
+            articles = data["articles"]
+            return articles
+        else:
+            logger.error("Haber verisi boş veya hatalı formatta")
+            return []
+    except Exception as e:
+        logger.error(f"Haber çekme hatası: {e}")
         return []
 
-def analyze_news(news_titles):
-    results = []
-    for title in news_titles:
-        sentiment = TextBlob(title).sentiment.polarity
-        keywords_found = [kw for kw in KEYWORDS if kw in title.lower()]
-        results.append((title, sentiment, keywords_found))
-    return results
+# ---- Telegram komutları ----
+def durum(update, context):
+    gold_price = get_gold_price()
+    usd_try = get_usd_try()
 
-def save_price(fiyat):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    zaman = time.strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO altin (zaman, fiyat) VALUES (?, ?)", (zaman, fiyat))
-    conn.commit()
-    conn.close()
+    if gold_price is None or usd_try is None:
+        text = "Fiyat bilgileri alınamadı."
+    else:
+        text = (f"Gram Altın: {gold_price:.2f} USD\n"
+                f"USD/TRY: {usd_try:.4f} TL\n")
 
-def load_prices():
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query("SELECT * FROM altin", conn)
-    conn.close()
-    return df
+    update.message.reply_text(text)
 
-def train_model():
-    df = load_prices()
-    if len(df) < 30:
-        logging.info("Yeterli veri yok, model eğitilemiyor.")
-        return False
-    data = df.copy()
-    scaler = MinMaxScaler()
-    data["fiyat_scaled"] = scaler.fit_transform(data["fiyat"].values.reshape(-1, 1))
+def start(update, context):
+    update.message.reply_text(
+        "Merhaba! /durum komutuyla güncel fiyatları görebilirsin."
+    )
 
-    seq_len = 10
-    X, y = [], []
-    for i in range(len(data) - seq_len):
-        X.append(data["fiyat_scaled"].values[i:i+seq_len])
-        y.append(data["fiyat_scaled"].values[i+seq_len])
-    X, y = np.array(X), np.array(y)
-    X = X.reshape((X.shape[0], X.shape[1], 1))
+# ---- Flask ve Telegram Bot entegrasyonu ----
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok"
 
-    model = Sequential()
-    model.add(LSTM(50, return_sequences=True, input_shape=(seq_len, 1)))
-    model.add(LSTM(50))
-    model.add(Dense(1))
-    model.compile(optimizer="adam", loss="mean_squared_error")
-    model.fit(X, y, epochs=10, batch_size=8, verbose=0)
+def run_flask():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 
-    model.save(MODEL_PATH)
-    np.save(SCALER_PATH, scaler.scale_)
-    np.save(SCALER_PATH.replace(".npy", "_min.npy"), scaler.min_)
-    logging.info("Model eğitildi ve kaydedildi.")
-    return True
+# ---- Telegram bot dispatcher ayarı ----
+dispatcher = Dispatcher(bot, None, workers=0)
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("durum", durum))
 
-def load_model_and_scaler():
-    if not os.path.exists(MODEL_PATH) or not os.path.exists(SCALER_PATH):
-        return None, None
-    from tensorflow.keras.models import load_model
-    model = load_model(MODEL_PATH)
-    scale_ = np.load(SCALER_PATH)
-    min_ = np.load(SCALER_PATH.replace(".npy", "_min.npy"))
-    scaler = MinMaxScaler()
-    scaler.scale_ = scale_
-    scaler.min_ = min_
-    scaler.data_min_ = 0
-    scaler.data_max_ = 1
-    scaler.data_range_ = 1
-    return model, scaler
+# ---- Main döngü (Render veya başka sunucuda 12 saatlik çalışmaya uygun) ----
+def main():
+    # Flask web sunucusunu thread olarak başlat
+    Thread(target=run_flask).start()
 
-def lstm_predict(prices):
-    model, scaler = load_model_and_scaler()
-    if model is None or scaler is None or len(prices) < 10:
-        return None
-    scaled = scaler.transform(prices["fiyat"].values.reshape(-1, 1))
-    seq_len = 10
-    X = []
-    X.append(scaled[-seq_len:].reshape(seq_len, 1))
-    X = np.array(X)
-    pred_scaled = model.predict(X)[0][0]
-    pred = pred_scaled * (1 / scaler.scale_[0]) - scaler.min_[0] / scaler.scale_[0]
-    return pred
-
-def calc_confidence_score():
-    df = load_prices()
-    if len(df) < 20:
-        return None
-    model, scaler = load_model_and_scaler()
-    if model is None or scaler is None:
-        return None
-    errors = []
-    seq_len = 10
-    data = df.copy()
-    scaled = scaler.transform(data["fiyat"].values.reshape(-1, 1))
-    for i in range(len(data) - seq_len - 1):
-        X = scaled[i:i + seq_len].reshape(1, seq_len, 1)
-        pred = model.predict(X)[0][0]
-        true = scaled[i + seq_len][0]
-        errors.append(abs(true - pred))
-    if not errors:
-        return None
-    avg_error = np.mean(errors)
-    confidence = max(0, 100 - avg_error * 1000)
-    return round(confidence, 2)
-
-def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text}
-    try:
-        r = requests.post(url, data=payload, timeout=10)
-        r.raise_for_status()
-    except Exception as e:
-        logging.error(f"Telegram mesajı gönderme hatası: {e}")
-
-def monitor_loop():
-    last_train_date = None
-    check_counter = 0
+    # Buraya ileride fiyat takibi ve fırsat varsa Telegram'a bildirme kodu eklenebilir
     while True:
-        fiyat = get_gold_price()
-        if fiyat:
-            save_price(fiyat)
-            now_date = datetime.date.today()
-            if last_train_date != now_date:
-                train_model()
-                last_train_date = now_date
-
-            df = load_prices()
-            tahmin = lstm_predict(df.tail(50))
-            confidence = calc_confidence_score()
-
-            mesaj = ""
-            if tahmin and fiyat < tahmin * 0.97:
-                mesaj += f"💰 Fırsat: Altın şu anda {fiyat:.2f} ₺, tahmin {tahmin:.2f} ₺\n"
-                if confidence is not None:
-                    mesaj += f"🔒 Güven skoru: %{confidence}\n"
-
-            if check_counter % 6 == 0:  # 6x10dk = 1 saat
-                haberler = get_finance_news()
-                analiz = analyze_news(haberler)
-                for title, sentiment, keywords in analiz:
-                    if keywords or sentiment < -0.1:
-                        mesaj += f"📢 Haber: {title}\n➡ Duygu: {'Negatif' if sentiment < 0 else 'Pozitif'}\nAnahtar: {', '.join(keywords)}\n\n"
-
-            if mesaj:
-                send_telegram_message(mesaj)
-
-        check_counter += 1
-        time.sleep(600)
-
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    data = request.json
-    if "message" in data:
-        text = data["message"].get("text", "")
-        if text == "/durum":
-            fiyat = get_gold_price()
-            send_telegram_message(f"📊 Gram altın: {fiyat:.2f} ₺" if fiyat else "Fiyat alınamadı.")
-    return {"ok": True}
+        time.sleep(3600)  # Saatte bir bekle (veya ihtiyaca göre değiştir)
+        # Fiyat ve fırsat kontrolü yapılabilir
 
 if __name__ == "__main__":
-    init_db()
-    Thread(target=monitor_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=5000)
+    main()
