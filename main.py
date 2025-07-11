@@ -112,8 +112,8 @@ def run_flask():
     web_app.run(host="0.0.0.0", port=5000)
 
 if __name__ == "__main__":
-    # Flask'ı ayrı thread'de başlat
-    threading.Thread(target=run_flask).start()
+    # Telegram botu ayrı thread'de başlat
+    threading.Thread(target=lambda: asyncio.run(start_bot())).start()
 
-    # Telegram botu asyncio event loop ile çalıştır
-    asyncio.run(start_bot())
+    # Flask ana thread'de çalışsın
+    web_app.run(host="0.0.0.0", port=5000)
