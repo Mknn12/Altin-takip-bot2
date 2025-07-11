@@ -33,8 +33,10 @@ def veri_guncelle():
     try:
         # API'den verileri al
         altin = float(requests.get("https://api.exchangerate.host/latest?base=TRY&symbols=XAU").json()["rates"]["XAU"])
+        print(response.json())  # gelen JSON'u gör
         usd = float(requests.get("https://api.exchangerate.host/latest?base=TRY&symbols=USD").json()["rates"]["USD"])
-
+        print(response.json())  # gelen JSON'u gör
+      
         # Haber analiz
         metin = requests.get("https://www.bloomberg.com/markets/economics").text
         haber_puani = TextBlob(metin).sentiment.polarity
