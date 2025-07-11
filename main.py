@@ -87,12 +87,13 @@ async def firsat_analiz_ve_gonder():
     altin, usd, puan = veri_cek()
     tahmin = altin_tahmini()
     if tahmin and tahmin > altin * 1.01 and puan > 0.2:
-        mesaj = f"🚨 *Fırsat Algılandı!*
+        mesaj = f"""🚨 *Fırsat Algılandı!*
 
 Tahmini altın fiyatı: {tahmin:.2f}
 Şu anki fiyat: {altin:.2f}
-Haber etkisi pozitif ({puan})"
+Haber etkisi pozitif ({puan:.2f})"""
         await bot_app.bot.send_message(chat_id=CHAT_ID, text=mesaj, parse_mode="Markdown")
+
 
 # Komut: /durum
 async def durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
