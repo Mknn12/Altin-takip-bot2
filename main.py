@@ -115,16 +115,13 @@ def home():
 def flask_thread():
     web_app.run(host="0.0.0.0", port=5000)
 
-# Bot başlat
 async def start_bot():
     global bot_app
     bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("durum", durum))
     print("✅ Telegram botu başlatıldı")
-    await bot_app.start()
-    while True:
-        await firsat_analiz_ve_gonder()
-        await asyncio.sleep(900)  # 15 dakikada bir tekrar
+    # await bot_app.start()  # Bunu kaldırıyoruz çünkü run_polling zaten start vs yapıyor
+    await bot_app.run_polling(stop_signals=None)  # Botu başlatır ve dinlemeye devam eder
 
 # Ana giriş
 if __name__ == "__main__":
