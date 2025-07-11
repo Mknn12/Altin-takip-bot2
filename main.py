@@ -3,6 +3,7 @@ import requests
 import sqlite3
 import logging
 import asyncio
+import threading
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Update
@@ -31,45 +32,54 @@ conn.commit()
 # Veri çekme ve tahmin
 def veri_guncelle():
     try:
-        # API'den verileri al
-        altin = float(requests.get("https://api.exchangerate.host/latest?base=TRY&symbols=XAU").json()["rates"]["XAU"])
-        print(response.json())  # gelen JSON'u gör
-        usd = float(requests.get("https://api.exchangerate.host/latest?base=TRY&symbols=USD").json()["rates"]["USD"])
-        print(response.json())  # gelen JSON'u gör
-      
-        # Haber analiz
+        altin_response = requests.get("https://api.exchangerate.host/latest?base=TRY&symbols=XAU")
+        altin = float(altin_response.json()["rates"]["XAU"])
+        print("Altın verisi:", altin_response.json())
+
+        usd_response = requests.get("https://api.exchangerate.host/latest?base=TRY&symbols=USD")
+        usd = float(usd_response.json()["rates"]["USD"])
+        print("USD verisi:", usd_response.json())
+
         metin = requests.get("https://www.bloomberg.com/markets/economics").text
         haber_puani = TextBlob(metin).sentiment.polarity
 
-        # DB'ye kaydet
         tarih = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         c.execute("INSERT INTO fiyatlar VALUES (?, ?, ?, ?)", (tarih, altin, usd, haber_puani))
         conn.commit()
+
         logging.info(f"Veri alındı: Altın={altin}, USD={usd}, Haber={haber_puani:.2f}")
         model_tahmin()
+
     except Exception as e:
         logging.error(f"Veri çekme hatası: {e}")
 
 def model_tahmin():
     df = pd.read_sql_query("SELECT * FROM fiyatlar", conn)
-    if len(df) < 20: return
+    if len(df) < 20:
+        return
+
     df['tarih'] = pd.to_datetime(df['tarih'])
     df.sort_values('tarih', inplace=True)
     df['altin_gelecek'] = df['altin'].shift(-1)
     df.dropna(inplace=True)
+
     X = df[['altin', 'usd', 'haber_puani']]
     y = df['altin_gelecek']
+
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     model = XGBRegressor()
     model.fit(X_train, y_train)
+
     pred = model.predict([X.iloc[-1]])[0]
     son = df['altin'].iloc[-1]
+
     if pred > son * 1.01:
         mesaj = f"📈 Altın artabilir. Tahmin: {pred:.2f}"
     elif pred < son * 0.99:
         mesaj = f"📉 Altın düşebilir. Tahmin: {pred:.2f}"
     else:
         mesaj = None
+
     if mesaj:
         try:
             import telegram
@@ -85,14 +95,17 @@ async def durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mesaj = f"📊 Son Veri\nTarih: {row[0]}\nAltın: {row[1]}\nUSD: {row[2]}\nHaber Puanı: {row[3]:.2f}" if row else "Veri bulunamadı."
     await update.message.reply_text(mesaj)
 
-# Telegram bot başlat
-async def start_bot():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("durum", durum))
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    await app.updater.idle()
+# Botu ayrı thread ile başlat (async + Flask uyumu için)
+def telegram_bot_baslat():
+    async def bot_runner():
+        app = ApplicationBuilder().token(BOT_TOKEN).build()
+        app.add_handler(CommandHandler("durum", durum))
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        await app.updater.idle()
+
+    asyncio.run(bot_runner())
 
 # Zamanlayıcı başlat
 scheduler = BackgroundScheduler(timezone="Europe/Istanbul")
@@ -101,12 +114,14 @@ scheduler.start()
 
 # Flask sunucusu
 web_app = Flask(__name__)
+
 @web_app.route("/")
 def home():
     return "Bot çalışıyor."
 
 # Hepsi başlatılıyor
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(start_bot())
+    bot_thread = threading.Thread(target=telegram_bot_baslat)
+    bot_thread.start()
+
     web_app.run(host="0.0.0.0", port=5000)
