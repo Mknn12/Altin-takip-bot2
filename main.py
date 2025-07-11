@@ -1,7 +1,5 @@
 import os
 import sqlite3
-import logging
-from flask import Flask
 import threading
 import asyncio
 import datetime
@@ -11,6 +9,7 @@ from sklearn.linear_model import LinearRegression
 import numpy as np
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from flask import Flask
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,7 +44,7 @@ def haber_puani_getir():
         for haber in haberler:
             blob = TextBlob(haber['title'] + ". " + haber['text'])
             puanlar.append(blob.sentiment.polarity)
-        return round(sum(puanlar)/len(puanlar), 3) if puanlar else 0.0
+        return round(sum(puanlar) / len(puanlar), 3) if puanlar else 0.0
     except Exception as e:
         print("Haber puanı hatası:", e)
         return 0.0
@@ -68,7 +67,7 @@ def veri_cek():
         return altin, usd, puan
     except Exception as e:
         print("Veri çekme hatası:", e)
-        return None
+        return None, None, None
 
 # ML tahmini
 def altin_tahmini():
@@ -85,6 +84,8 @@ def altin_tahmini():
 # Fırsat analizi & Telegram bildirimi
 async def firsat_analiz_ve_gonder():
     altin, usd, puan = veri_cek()
+    if altin is None:
+        return
     tahmin = altin_tahmini()
     if tahmin and tahmin > altin * 1.01 and puan > 0.2:
         mesaj = f"""🚨 *Fırsat Algılandı!*
@@ -93,7 +94,6 @@ Tahmini altın fiyatı: {tahmin:.2f}
 Şu anki fiyat: {altin:.2f}
 Haber etkisi pozitif ({puan:.2f})"""
         await bot_app.bot.send_message(chat_id=CHAT_ID, text=mesaj, parse_mode="Markdown")
-
 
 # Komut: /durum
 async def durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,15 +115,34 @@ def home():
 def flask_thread():
     web_app.run(host="0.0.0.0", port=5000)
 
+# Periyodik fırsat analizi görevi
+async def periyodik_firsat_analizi():
+    while True:
+        await firsat_analiz_ve_gonder()
+        await asyncio.sleep(900)  # 15 dakika
+
 async def start_bot():
     global bot_app
     bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("durum", durum))
     print("✅ Telegram botu başlatıldı")
-    # await bot_app.start()  # Bunu kaldırıyoruz çünkü run_polling zaten start vs yapıyor
-    await bot_app.run_polling(stop_signals=None)  # Botu başlatır ve dinlemeye devam eder
 
-# Ana giriş
+    # Botu ve periyodik task'ı aynı event loop'ta çalıştır
+    await asyncio.gather(
+        bot_app.run_polling(stop_signals=None),
+        periyodik_firsat_analizi()
+    )
+
 if __name__ == "__main__":
-    threading.Thread(target=flask_thread).start()
-    asyncio.run(start_bot())
+    threading.Thread(target=flask_thread, daemon=True).start()
+
+    # Render ortamında event loop zaten çalışıyor olabilir, buna göre çalıştır:
+    try:
+        asyncio.run(start_bot())
+    except RuntimeError as e:
+        if "This event loop is already running" in str(e):
+            loop = asyncio.get_event_loop()
+            loop.create_task(start_bot())
+            loop.run_forever()
+        else:
+            raise
