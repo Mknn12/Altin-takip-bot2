@@ -1,21 +1,19 @@
-# Temel imaj
+# Temel Python 3.10 imajı
 FROM python:3.10-slim
 
-# Çalışma dizini
+# Çalışma dizini oluştur ve ayarla
 WORKDIR /app
 
-# Gereksinimler kopyalanır
+# Gereksinimleri kopyala ve yükle
 COPY requirements.txt .
 
-# Paketler yüklenir
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Uygulama dosyaları kopyalanır
+# Uygulama kodunu kopyala
 COPY . .
 
-# Ortam değişkenleri opsiyonel (bunları dışardan vermen iyi)
-# ENV BOT_TOKEN=...
-# ENV CHAT_ID=...
+# Flask için 5000 portu aç
+EXPOSE 5000
 
-# Uygulama başlatılır (Flask ve asyncio ile birlikte)
+# Çalıştırma komutu (python dosya adını main.py olarak varsayıyorum)
 CMD ["python", "main.py"]
