@@ -1,5 +1,6 @@
 import os
 import base64
+import time
 import sqlite3
 import requests
 import joblib
@@ -9,14 +10,13 @@ from textblob import TextBlob
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Bot
-from xgboost import XGBRegressor
-from sklearn.model_selection import train_test_split
 
-# Google Drive için
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-import io
+from googleapiclient.http import MediaFileUpload
+
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
 
 load_dotenv()
 
@@ -24,99 +24,70 @@ API_KEY = os.getenv("API_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-MODEL_FILE = "model.pkl"
-DB_NAME = "altin_fiyatlari.db"
-THRESHOLD_STD_DEV = 0.5  # Ortalama altı eşik çarpanı
-
-# Google Drive klasör ID'si (model dosyasını koyacağımız klasör)
-# Boş bırakırsan root'a koyar, tavsiye Drive'da kendin bir klasör açıp ID'sini buraya koy
-GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID") or None
-
-# Google Drive API Ayarları
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
-SERVICE_ACCOUNT_FILE = 'credentials.json'  # Bu dosyayı base64 ile .env'den diske yazıyoruz
-
+# Google Drive API Credentials dosyasını oluştur (env'den base64)
 def write_google_credentials():
     creds_base64 = os.getenv('GOOGLE_CREDS_BASE64')
     if creds_base64:
-        with open(SERVICE_ACCOUNT_FILE, 'wb') as f:
+        with open('credentials.json', 'wb') as f:
             f.write(base64.b64decode(creds_base64))
+        print("✅ credentials.json dosyası oluşturuldu.")
     else:
-        print("GOOGLE_CREDS_BASE64 env var bulunamadı!")
+        print("❌ GOOGLE_CREDS_BASE64 env var bulunamadı!")
 
 write_google_credentials()
 
-# Google Drive Servisi oluşturma
+# Google Drive servis objesi oluştur
 def get_drive_service():
-    credentials = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    service = build('drive', 'v3', credentials=credentials)
+    SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+    service = build('drive', 'v3', credentials=creds)
     return service
 
-# Drive'a dosya yükleme veya güncelleme
-def upload_file_to_drive(filename, mimetype='application/octet-stream'):
-    service = get_drive_service()
+drive_service = get_drive_service()
 
-    # Önce aynı ada sahip dosya var mı diye arıyoruz
-    query = f"name='{filename}'"
-    if GOOGLE_DRIVE_FOLDER_ID:
-        query += f" and '{GOOGLE_DRIVE_FOLDER_ID}' in parents"
-    results = service.files().list(q=query, spaces='drive',
-                                   fields="files(id, name)").execute()
-    files = results.get('files', [])
+def upload_file_to_drive(file_path, mime_type):
+    """Dosya Drive'da varsa günceller, yoksa yeni yükler."""
+    file_name = os.path.basename(file_path)
+    try:
+        results = drive_service.files().list(
+            q=f"name='{file_name}' and trashed=false",
+            spaces='drive',
+            fields="files(id, name)"
+        ).execute()
+        files = results.get('files', [])
 
-    media = MediaFileUpload(filename, mimetype=mimetype, resumable=True)
+        media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
 
-    if files:
-        # Dosya varsa güncelle
-        file_id = files[0]['id']
-        updated_file = service.files().update(fileId=file_id,
-                                              media_body=media).execute()
-        print(f"Google Drive: '{filename}' güncellendi.")
-    else:
-        # Yoksa yeni dosya oluştur
-        file_metadata = {'name': filename}
-        if GOOGLE_DRIVE_FOLDER_ID:
-            file_metadata['parents'] = [GOOGLE_DRIVE_FOLDER_ID]
-        file = service.files().create(body=file_metadata,
-                                      media_body=media,
-                                      fields='id').execute()
-        print(f"Google Drive: '{filename}' yüklendi.")
-
-# Drive'dan dosya indirme
-def download_file_from_drive(filename):
-    service = get_drive_service()
-
-    query = f"name='{filename}'"
-    if GOOGLE_DRIVE_FOLDER_ID:
-        query += f" and '{GOOGLE_DRIVE_FOLDER_ID}' in parents"
-    results = service.files().list(q=query, spaces='drive',
-                                   fields="files(id, name)").execute()
-    files = results.get('files', [])
-
-    if not files:
-        print(f"Google Drive: '{filename}' bulunamadı.")
-        return False
-
-    file_id = files[0]['id']
-    request = service.files().get_media(fileId=file_id)
-    fh = io.FileIO(filename, 'wb')
-
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-    print(f"Google Drive: '{filename}' indirildi.")
-    return True
+        if files:
+            file_id = files[0]['id']
+            drive_service.files().update(
+                fileId=file_id,
+                media_body=media
+            ).execute()
+            print(f"🔄 '{file_name}' Drive'da güncellendi.")
+        else:
+            file_metadata = {'name': file_name}
+            drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+            print(f"✅ '{file_name}' Drive'a yüklendi.")
+    except Exception as e:
+        print(f"⚠️ Drive'a yükleme hatası: {e}")
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
+
+DB_NAME = "altin_fiyatlari.db"
+MODEL_FILE = "model.pkl"
+THRESHOLD_STD_DEV = 0.5
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS altin (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id INTEGER PRIMARY KEY,
                     timestamp TEXT,
                     xautry REAL,
                     usd REAL,
@@ -138,11 +109,11 @@ def fetch_data():
 
         usd_try_url = f"https://financialmodelingprep.com/api/v3/quote/USD/TRY?apikey={API_KEY}"
         usd_data = requests.get(usd_try_url).json()
-        if not usd_data or "price" not in usd_data[0]:
-            print("❌ USD verisi alınamadı")
+        usd = usd_data[0]["price"]
+        if not isinstance(usd, (int, float)):
+            print(f"USD verisi geçersiz: {usd_data}")
             return
 
-        usd = float(usd_data[0]["price"])
         xautry = xau_usd * usd
 
         news_url = f"https://financialmodelingprep.com/api/v3/fmp/articles?page=0&size=1&apikey={API_KEY}"
@@ -187,8 +158,11 @@ def train_model():
     joblib.dump(model, MODEL_FILE)
     print("🧠 Model eğitildi ve kaydedildi.")
 
-    # Model Drive'a yedekleniyor
-    upload_file_to_drive(MODEL_FILE)
+    # Drive'a yedekle
+    upload_file_to_drive(MODEL_FILE, 'application/octet-stream')
+    upload_file_to_drive('main.py', 'text/x-python')
+    upload_file_to_drive('requirements.txt', 'text/plain')
+    upload_file_to_drive('Dockerfile', 'text/plain')
 
 def detect_opportunity():
     try:
@@ -202,10 +176,6 @@ def detect_opportunity():
         df = df.dropna()
         last_row = df.iloc[-1]
         current_price = last_row["xautry"]
-
-        if not os.path.exists(MODEL_FILE):
-            print("Model dosyası bulunamadı, fırsat tespiti yapılamıyor.")
-            return
 
         model = joblib.load(MODEL_FILE)
         predicted = model.predict([[last_row["usd"], last_row["duygu"]]])[0]
@@ -238,17 +208,8 @@ def run_scheduler():
 
 if __name__ == "__main__":
     init_db()
-
-    # Model varsa Drive'dan indir ve yükle, yoksa eğit
     if not os.path.exists(MODEL_FILE):
-        print("Model dosyası yok, Drive'dan indiriliyor...")
-        indirildi = download_file_from_drive(MODEL_FILE)
-        if not indirildi:
-            print("Drive'dan indirilemedi, model eğitilecek...")
-            train_model()
-    else:
-        print("Model dosyası mevcut.")
-
+        train_model()
     run_scheduler()
     print("✅ Telegram botu başlatıldı")
     app.run(host="0.0.0.0", port=5000)
