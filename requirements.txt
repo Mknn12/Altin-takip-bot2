@@ -1,8 +1,13 @@
-flask
+python-telegram-bot==20.7
+Flask==3.1.1
 requests
 python-dotenv
+nltk
 textblob
 scikit-learn
+xgboost
 numpy
-python-telegram-bot==20.7
-nest_asyncio
+pandas
+sqlalchemy
+joblib
+apscheduler
