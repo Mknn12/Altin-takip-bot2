@@ -9,6 +9,7 @@ from textblob import TextBlob
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Bot
+import base64
 
 from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
@@ -17,6 +18,18 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+def write_google_credentials():
+    creds_base64 = os.getenv('GOOGLE_CREDS_BASE64')
+    if creds_base64:
+        with open('credentials.json', 'wb') as f:
+            f.write(base64.b64decode(creds_base64))
+    else:
+        print("GOOGLE_CREDS_BASE64 env var bulunamadı!")
+
+# Bot başlatmadan önce bunu çağır
+write_google_credentials()
+
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
