@@ -474,4 +474,13 @@ def home():
         <h1>🏅 Altın Fiyat Takip Botu</h1>
         <p>📊 Toplam Kayıt: {record_count}</p>
         <p>💰 Son Fiyat: {last_price}</p>
-        <p>🧠 Model Durumu
+        <p>🧠 Model Durumu: {model_status}</p>
+        <p>⚡ Bot Durumu: ✅ Çalışıyor</p>
+        <p>🕒 Son Güncelleme: {last_update}</p>
+        <p>📱 Telegram Bot: {'✅ Aktif' if init_telegram_bot() else '❌ Hata'}</p>
+        <p>☁️ Drive Yedek: {'✅ Aktif' if os.path.exists('credentials.json') else '❌ Devre Dışı'}</p>
+        """
+    except Exception as e:
+        logger.error(f"❌ Dashboard hatası: {e}")
+        return f"⚠️ Dashboard hatası: {str(e)}"
+
