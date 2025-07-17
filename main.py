@@ -44,7 +44,7 @@ class Config:
     DB_NAME = "altin_fiyatlari.db"
     MODEL_FILE = "model.pkl"
     THRESHOLD_STD_DEV = 0.5
-    FETCH_INTERVAL_MINUTES = 10
+    FETCH_INTERVAL_MINUTES = 10  # 10 dakikada bir veri çekilecek
     REQUEST_TIMEOUT = 10
     
     @classmethod
@@ -94,7 +94,6 @@ def get_drive_service():
         return None
 
 def upload_file_to_drive(file_path, mime_type):
-    """Dosya Drive'da varsa günceller, yoksa yeni yükler."""
     if not os.path.exists(file_path):
         logger.warning(f"⚠️ Dosya bulunamadı: {file_path}")
         return False
@@ -141,8 +140,7 @@ app = Flask(__name__)
 def init_telegram_bot():
     try:
         bot = Bot(token=Config.BOT_TOKEN)
-        # Test bot connection
-        bot.get_me()
+        bot.get_me()  # Bağlantıyı test et
         logger.info("✅ Telegram bot bağlantısı başarılı")
         return bot
     except Exception as e:
@@ -176,10 +174,6 @@ def fetch_gold_price():
         },
         {
             "url": f"https://financialmodelingprep.com/api/v3/quote-short/XAUUSD?apikey={Config.API_KEY}",
-            "parser": lambda data: data[0]["price"] if data and len(data) > 0 and "price" in data[0] else None
-        },
-        {
-            "url": f"https://financialmodelingprep.com/api/v3/quote/XAUUSD?apikey={Config.API_KEY}",
             "parser": lambda data: data[0]["price"] if data and len(data) > 0 and "price" in data[0] else None
         }
     ]
@@ -304,15 +298,14 @@ def fetch_data():
         conn = sqlite3.connect(Config.DB_NAME)
         try:
             c = conn.cursor()
-            c.execute("""
-                INSERT INTO altin (timestamp, xautry, usd, haber, duygu) 
-                VALUES (?, ?, ?, ?, ?)
-            """, (timestamp, xau_try, usd_try, news_content, sentiment))
+            c.execute("""INSERT INTO altin (timestamp, xautry, usd, haber, duygu) VALUES (?, ?, ?, ?, ?)""",
+                      (timestamp, xau_try, usd_try, news_content, sentiment))
             conn.commit()
             logger.info(f"✅ Veri başarıyla kaydedildi: {xau_try:.2f} TL")
         finally:
             conn.close()
 
+        train_model()
         detect_opportunity()
         
     except Exception as e:
@@ -478,16 +471,20 @@ def home():
         <p>⚡ Bot Durumu: ✅ Çalışıyor</p>
         <p>🕒 Son Güncelleme: {last_update}</p>
         <p>📱 Telegram Bot: {'✅ Aktif' if init_telegram_bot() else '❌ Hata'}</p>
-        <p>☁️ Drive Yedek: {'✅ Aktif' if os.path.exists('credentials.json') else '❌ Devre Dışı'}</p>
         """
     except Exception as e:
-        logger.error(f"❌ Dashboard hatası: {e}")
-        return f"⚠️ Dashboard hatası: {str(e)}"
-if __name__ == "__main__":
-    init_db()  # Veritabanı ve tablo oluşturulsun
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+        logger.error(f"❌ Ana sayfa hatası: {e}")
+        return "Sunucu hatası"
 
+def start_scheduler():
+    scheduler = BackgroundScheduler(timezone=pytz.UTC)
+    scheduler.add_job(fetch_data, 'interval', minutes=Config.FETCH_INTERVAL_MINUTES, next_run_time=None)
+    scheduler.start()
+    logger.info("⏰ Scheduler başlatıldı, periyodik veri çekimi aktif")
 
-
-
+if __name__ == '__main__':
+    write_google_credentials()
+    init_db()
+    bot = init_telegram_bot()
+    start_scheduler()
+    app.run(host='0.0.0.0', port=10000)
