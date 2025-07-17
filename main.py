@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from textblob import TextBlob
 from flask import Flask, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
 from telegram import Bot
 
 from google.oauth2 import service_account
@@ -168,19 +169,15 @@ def init_db():
         raise
 
 def fetch_gold_price():
-    """XAU/USD fiyatını çek - Multiple API endpoints ile"""
     apis_to_try = [
-        # API 1: Financial Modeling Prep
         {
             "url": f"https://financialmodelingprep.com/api/v3/quote/XAUUSD?apikey={Config.API_KEY}",
             "parser": lambda data: data[0]["price"] if data and len(data) > 0 and "price" in data[0] else None
         },
-        # API 2: Alternative endpoint
         {
             "url": f"https://financialmodelingprep.com/api/v3/quote-short/XAUUSD?apikey={Config.API_KEY}",
             "parser": lambda data: data[0]["price"] if data and len(data) > 0 and "price" in data[0] else None
         },
-        # API 3: Real-time quote
         {
             "url": f"https://financialmodelingprep.com/api/v3/quote/XAUUSD?apikey={Config.API_KEY}",
             "parser": lambda data: data[0]["price"] if data and len(data) > 0 and "price" in data[0] else None
@@ -215,7 +212,6 @@ def fetch_gold_price():
     return None
 
 def fetch_usd_try_rate():
-    """USD/TRY kurunu çek"""
     apis_to_try = [
         f"https://financialmodelingprep.com/api/v3/quote/USDTRY?apikey={Config.API_KEY}",
         f"https://financialmodelingprep.com/api/v3/quote-short/USDTRY?apikey={Config.API_KEY}"
@@ -248,7 +244,6 @@ def fetch_usd_try_rate():
     return None
 
 def fetch_news_sentiment():
-    """Haber ve duygu analizi"""
     try:
         news_url = f"https://financialmodelingprep.com/api/v3/fmp/articles?page=0&size=1&apikey={Config.API_KEY}"
         response = requests.get(news_url, timeout=Config.REQUEST_TIMEOUT)
@@ -269,7 +264,6 @@ def fetch_news_sentiment():
             
         logger.info(f"📰 Haber içeriği alındı: {news_content[:100]}...")
         
-        # Duygu analizi
         try:
             sentiment = TextBlob(news_content).sentiment.polarity
             logger.info(f"💭 Duygu skoru: {sentiment}")
@@ -287,30 +281,24 @@ def fetch_news_sentiment():
     return "News API error", 0.0
 
 def fetch_data():
-    """Ana veri çekme fonksiyonu"""
     try:
         logger.info("📊 Veri çekimi başlatılıyor...")
         
-        # XAU/USD fiyatını çek
         xau_usd = fetch_gold_price()
         if xau_usd is None:
             logger.error("❌ XAU/USD verisi alınamadı, veri çekimi iptal edildi")
             return
             
-        # USD/TRY kurunu çek
         usd_try = fetch_usd_try_rate()
         if usd_try is None:
             logger.error("❌ USD/TRY verisi alınamadı, veri çekimi iptal edildi")
             return
             
-        # XAU/TRY hesapla
         xau_try = xau_usd * usd_try
         logger.info(f"💰 XAU/TRY hesaplandı: {xau_try:.2f} TL")
         
-        # Haber ve duygu analizi
         news_content, sentiment = fetch_news_sentiment()
         
-        # Veritabanına kaydet
         timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
         
         conn = sqlite3.connect(Config.DB_NAME)
@@ -325,14 +313,12 @@ def fetch_data():
         finally:
             conn.close()
 
-        # Fırsat tespiti
         detect_opportunity()
         
     except Exception as e:
         logger.error(f"🚨 Veri çekme genel hatası: {e}")
 
 def train_model():
-    """Model eğitimi"""
     try:
         conn = sqlite3.connect(Config.DB_NAME)
         df = pd.read_sql_query("SELECT * FROM altin", conn)
@@ -344,7 +330,6 @@ def train_model():
             logger.warning("⚠️ Model eğitimi için yeterli veri yok (minimum 10 kayıt)")
             return False
 
-        # Veri temizleme
         df = df.dropna()
         logger.info(f"📊 Temizleme sonrası {len(df)} kayıt kaldı")
         
@@ -352,7 +337,6 @@ def train_model():
             logger.warning("⚠️ Temizleme sonrası yeterli veri yok")
             return False
             
-        # Özellik ve hedef değişkenleri kontrol et
         required_columns = ["usd", "duygu", "xautry"]
         if not all(col in df.columns for col in required_columns):
             logger.error("⚠️ Gerekli sütunlar bulunamadı")
@@ -361,12 +345,10 @@ def train_model():
         X = df[["usd", "duygu"]]
         y = df["xautry"]
 
-        # Veri geçerliliği kontrol et
         if X.empty or y.empty or len(X) != len(y):
             logger.error("⚠️ Eğitim verisi geçersiz")
             return False
 
-        # Test boyutunu veri miktarına göre ayarla
         test_size = min(0.2, max(0.1, 5.0 / len(df)))
         
         try:
@@ -377,7 +359,6 @@ def train_model():
             logger.error(f"⚠️ Train-test split hatası: {e}")
             return False
 
-        # Model eğitimi
         model = XGBRegressor(
             n_estimators=min(100, len(X_train) * 2),
             learning_rate=0.1,
@@ -387,11 +368,9 @@ def train_model():
         
         model.fit(X_train, y_train)
 
-        # Model kaydet
         joblib.dump(model, Config.MODEL_FILE)
         logger.info("🧠 Model başarıyla eğitildi ve kaydedildi")
 
-        # Drive'a yedekle
         if os.path.exists('credentials.json'):
             upload_file_to_drive(Config.MODEL_FILE, 'application/octet-stream')
             upload_file_to_drive(Config.DB_NAME, 'application/octet-stream')
@@ -403,9 +382,7 @@ def train_model():
         return False
 
 def detect_opportunity():
-    """Fırsat tespiti"""
     try:
-        # Model kontrolü
         if not os.path.exists(Config.MODEL_FILE):
             logger.info("⚠️ Model dosyası bulunamadı, fırsat tespiti yapılamıyor")
             return
@@ -424,10 +401,9 @@ def detect_opportunity():
             logger.warning("⚠️ Temizleme sonrası veri kalmadı")
             return
             
-        last_row = df.iloc[0]  # En son kayıt
+        last_row = df.iloc[0]
         current_price = last_row["xautry"]
 
-        # Model yükle ve tahmin yap
         try:
             model = joblib.load(Config.MODEL_FILE)
             predicted = model.predict([[last_row["usd"], last_row["duygu"]]])[0]
@@ -435,7 +411,6 @@ def detect_opportunity():
             logger.error(f"⚠️ Model tahmin hatası: {e}")
             return
 
-        # İstatistikler
         mean_price = df["xautry"].mean()
         std_dev = df["xautry"].std()
         
@@ -443,7 +418,6 @@ def detect_opportunity():
             logger.warning("⚠️ Standart sapma 0, fırsat tespiti yapılamıyor")
             return
 
-        # Fırsat kontrolü
         threshold = mean_price - Config.THRESHOLD_STD_DEV * std_dev
         
         logger.info(f"📊 Fırsat Analizi - Mevcut: {current_price:.2f}, Eşik: {threshold:.2f}, Ortalama: {mean_price:.2f}")
@@ -460,7 +434,6 @@ def detect_opportunity():
                 f"⏰ Zaman: {last_row['timestamp']}"
             )
             
-            # Telegram bildirimi
             bot = init_telegram_bot()
             if bot:
                 try:
@@ -501,116 +474,4 @@ def home():
         <h1>🏅 Altın Fiyat Takip Botu</h1>
         <p>📊 Toplam Kayıt: {record_count}</p>
         <p>💰 Son Fiyat: {last_price}</p>
-        <p>🧠 Model Durumu: {model_status}</p>
-        <p>⚡ Bot Durumu: ✅ Çalışıyor</p>
-        <p>🕒 Son Güncelleme: {last_update}</p>
-        <p>📱 Telegram Bot: {'✅ Aktif' if init_telegram_bot() else '❌ Hata'}</p>
-        <p>☁️ Drive Yedek: {'✅ Aktif' if os.path.exists('credentials.json') else '❌ Devre Dışı'}</p>
-        """
-    except Exception as e:
-        logger.error(f"❌ Dashboard hatası: {e}")
-        return f"⚠️ Dashboard hatası: {str(e)}"
-
-@app.route('/status')
-def status():
-    try:
-        conn = sqlite3.connect(Config.DB_NAME)
-        df = pd.read_sql_query("SELECT * FROM altin ORDER BY timestamp DESC LIMIT 1", conn)
-        conn.close()
-        
-        if df.empty:
-            return jsonify({"status": "error", "message": "No data available"})
-            
-        last_record = df.iloc[0]
-        return jsonify({
-            "status": "success",
-            "last_update": last_record['timestamp'],
-            "current_price": float(last_record['xautry']),
-            "usd_rate": float(last_record['usd']),
-            "sentiment": float(last_record['duygu']),
-            "model_exists": os.path.exists(Config.MODEL_FILE),
-            "total_records": len(df)
-        })
-    except Exception as e:
-        logger.error(f"❌ Status endpoint hatası: {e}")
-        return jsonify({"status": "error", "message": str(e)})
-
-@app.route('/train')
-def manual_train():
-    """Manuel model eğitimi endpoint"""
-    try:
-        success = train_model()
-        if success:
-            return jsonify({"status": "success", "message": "Model başarıyla eğitildi"})
-        else:
-            return jsonify({"status": "error", "message": "Model eğitimi başarısız"})
-    except Exception as e:
-        logger.error(f"❌ Manuel eğitim hatası: {e}")
-        return jsonify({"status": "error", "message": str(e)})
-
-@app.route('/fetch')
-def manual_fetch():
-    """Manuel veri çekimi endpoint"""
-    try:
-        fetch_data()
-        return jsonify({"status": "success", "message": "Veri başarıyla çekildi"})
-    except Exception as e:
-        logger.error(f"❌ Manuel veri çekimi hatası: {e}")
-        return jsonify({"status": "error", "message": str(e)})
-
-def main():
-    logger.info("🚀 Altın Fiyat Takip Botu başlatılıyor...")
-    
-    # Google credentials yazma
-    write_google_credentials()
-    
-    # Veritabanı başlatma
-    init_db()
-    
-    # İlk model eğitimi
-    if not os.path.exists(Config.MODEL_FILE):
-        logger.info("🧠 Model bulunamadı, eğitim başlatılıyor...")
-        if not train_model():
-            logger.warning("⚠️ Model eğitimi başarısız, daha sonra tekrar denenecek")
-    else:
-        logger.info("✅ Model mevcut")
-    
-    # Zamanlayıcı başlatma
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(
-        fetch_data, 
-        'interval', 
-        minutes=Config.FETCH_INTERVAL_MINUTES,
-        id='fetch_data',
-        replace_existing=True
-    )
-    
-    # Her 6 saatte bir model eğitimi
-    scheduler.add_job(
-        train_model,
-        'interval',
-        hours=6,
-        id='train_model',
-        replace_existing=True
-    )
-    
-    scheduler.start()
-    logger.info(f"🕒 Zamanlayıcı başlatıldı ({Config.FETCH_INTERVAL_MINUTES} dakika aralıklarla)")
-    
-    # İlk veri çekimi
-    logger.info("📊 İlk veri çekimi başlatılıyor...")
-    fetch_data()
-    
-    try:
-        logger.info("✅ Flask sunucusu başlatılıyor...")
-        app.run(host="0.0.0.0", port=5000, debug=False)
-    except KeyboardInterrupt:
-        logger.info("🛑 Uygulama manuel olarak durduruldu")
-    except Exception as e:
-        logger.error(f"❌ Flask sunucusu hatası: {e}")
-    finally:
-        scheduler.shutdown()
-        logger.info("🔌 Zamanlayıcı kapatıldı")
-
-if __name__ == "__main__":
-    main()
+        <p>🧠 Model Durumu
